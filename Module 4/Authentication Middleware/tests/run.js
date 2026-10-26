@@ -11,6 +11,9 @@ const http = require('http');
 const jwt = require('jsonwebtoken');
 
 const SECRET = process.env.JWT_SECRET;
+const AUTH_REQUIRED_BODY = {
+  error: { code: 'AUTH_REQUIRED', message: 'Authentication required' },
+};
 
 // Silence the app's listen log during tests
 const originalLog = console.log;
@@ -61,6 +64,14 @@ function assert(condition, message) {
   }
 }
 
+function assertAuthFailure(res, message) {
+  assert(res.status === 401, `${message}: status is 401 (got ${res.status})`);
+  assert(
+    JSON.stringify(res.body) === JSON.stringify(AUTH_REQUIRED_BODY),
+    `${message}: exact generic authentication response`
+  );
+}
+
 async function runTests() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   console.log('\nLU 51 — Authentication Middleware Tests\n');
@@ -69,11 +80,7 @@ async function runTests() {
   console.log('Test 1: Missing Authorization header');
   {
     const res = await request(server, { path: '/profile' });
-    assert(res.status === 401, `Status is 401 (got ${res.status})`);
-    assert(
-      res.body?.error?.code === 'AUTH_REQUIRED',
-      `Body has error.code AUTH_REQUIRED (got ${res.body?.error?.code})`
-    );
+    assertAuthFailure(res, 'Missing Authorization header');
   }
 
   // ── Test 2: Invalid token returns 401 ─────────────────────────────────────
@@ -83,11 +90,7 @@ async function runTests() {
       path: '/profile',
       headers: { Authorization: 'Bearer not.a.valid.token' },
     });
-    assert(res.status === 401, `Status is 401 (got ${res.status})`);
-    assert(
-      res.body?.error?.code === 'AUTH_REQUIRED',
-      `Body has error.code AUTH_REQUIRED (got ${res.body?.error?.code})`
-    );
+    assertAuthFailure(res, 'Malformed JWT');
   }
 
   // ── Test 2b: Wrong scheme returns 401 ─────────────────────────────────────
@@ -97,7 +100,28 @@ async function runTests() {
       path: '/profile',
       headers: { Authorization: 'Basic dXNlcjpwYXNz' },
     });
-    assert(res.status === 401, `Status is 401 (got ${res.status})`);
+    assertAuthFailure(res, 'Wrong Authorization scheme');
+  }
+
+  // ── Test 2c: Empty token returns 401 ──────────────────────────────────────
+  console.log('\nTest 2c: Empty Bearer token');
+  {
+    const res = await request(server, {
+      path: '/profile',
+      headers: { Authorization: 'Bearer   ' },
+    });
+    assertAuthFailure(res, 'Empty Bearer token');
+  }
+
+  // ── Test 2d: Incorrect signature returns 401 ──────────────────────────────
+  console.log('\nTest 2d: Incorrectly signed token');
+  {
+    const token = jwt.sign({ sub: 'user-7' }, 'different-test-secret', { algorithm: 'HS256' });
+    const res = await request(server, {
+      path: '/profile',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assertAuthFailure(res, 'Incorrectly signed token');
   }
 
   // ── Test 3: Valid token attaches user payload ──────────────────────────────
@@ -118,6 +142,15 @@ async function runTests() {
   // ── Test 4: Protected routes allow authenticated users ────────────────────
   console.log('\nTest 4: Protected routes respond correctly with valid token');
   {
+    for (const [method, path] of [
+      ['GET', '/profile'],
+      ['GET', '/posts/my'],
+      ['POST', '/posts'],
+    ]) {
+      const unauthenticated = await request(server, { method, path });
+      assertAuthFailure(unauthenticated, `${method} ${path} without token`);
+    }
+
     const token = jwt.sign({ sub: 'user-42' }, SECRET, { algorithm: 'HS256', expiresIn: '1h' });
     const res1 = await request(server, { path: '/posts/my', headers: { Authorization: `Bearer ${token}` } });
     assert(res1.status === 200, `GET /posts/my returns 200 (got ${res1.status})`);
@@ -139,11 +172,7 @@ async function runTests() {
       path: '/profile',
       headers: { Authorization: `Bearer ${expiredToken}` },
     });
-    assert(res.status === 401, `Status is 401 (got ${res.status})`);
-    assert(
-      res.body?.error?.code === 'AUTH_REQUIRED',
-      `Same generic AUTH_REQUIRED (got ${res.body?.error?.code})`
-    );
+    assertAuthFailure(res, 'Expired token');
   }
 
   // ── Test 6: Public route remains accessible ────────────────────────────────
